@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/alibaba/open-code-review/internal/gitcmd"
 )
@@ -433,6 +434,77 @@ func TestTrimGitUsage_PreservesDiagnosticWithoutUsage(t *testing.T) {
 func TestTrimGitUsage_WhitespaceOnly(t *testing.T) {
 	if got := trimGitUsage(" \n\t", 129); got != "" {
 		t.Errorf("trimGitUsage() = %q, want empty string", got)
+	}
+}
+
+// TestGitGrep_LongLineTruncation verifies that a matched line longer than
+// gitGrepMaxLineLen is truncated to the cap with a marker, that the truncation
+// is reported in a note, and that ordinary lines pass through untouched.
+func TestGitGrep_LongLineTruncation(t *testing.T) {
+	dir := setupTestRepo(t)
+	long := strings.Repeat("x", 6000)
+	short := "func ShortNeedle() {}\n"
+	// The needle appears inside the long line after a distinctive prefix so the
+	// assertion can check both ends of the truncated content.
+	longLine := "// prefix " + "Needle " + long + " suffix\n"
+	if err := os.WriteFile(filepath.Join(dir, "bundle.js"), []byte(short+longLine), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p := NewCodeSearch(&FileReader{RepoDir: dir, Mode: ModeWorkspace})
+	result, err := p.gitGrep(context.Background(), "Needle", false, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(result, "were truncated to protect the context window") {
+		t.Errorf("expected truncation note in result, got:\n%.400s", result)
+	}
+	if !strings.Contains(result, "...(truncated, total 6024 chars)") {
+		t.Errorf("expected truncation marker with rune count, got:\n%.400s", result)
+	}
+	if strings.Contains(result, long+" suffix") {
+		t.Errorf("expected the oversize line to be truncated, got full line")
+	}
+	if !strings.Contains(result, "func ShortNeedle() {}") {
+		t.Errorf("expected short match line to pass through untouched")
+	}
+	// The rendered long line must be bounded: cap + marker only.
+	for _, l := range strings.Split(result, "\n") {
+		if strings.HasPrefix(l, "1|") || strings.HasPrefix(l, "2|") {
+			if len([]rune(l)) > gitGrepMaxLineLen+len([]rune(" ...(truncated, total NNNN chars)"))+16 {
+				t.Errorf("rendered line too large: %d runes", len([]rune(l)))
+			}
+		}
+	}
+}
+
+// TestGitGrep_LongLineTruncation_UTF8 verifies rune-safe truncation: cutting at
+// the cap never splits a multi-byte character.
+func TestGitGrep_LongLineTruncation_UTF8(t *testing.T) {
+	dir := setupTestRepo(t)
+	// 7000 Chinese characters (each 3 bytes in UTF-8) — the byte length is far
+	// over the cap while the rune count determines the cut.
+	cn := strings.Repeat("界", 7000)
+	if err := os.WriteFile(filepath.Join(dir, "i18n.go"), []byte("// Needle "+cn+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p := NewCodeSearch(&FileReader{RepoDir: dir, Mode: ModeWorkspace})
+	result, err := p.gitGrep(context.Background(), "Needle", false, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(result, "...(truncated, total 7010 chars)") {
+		t.Errorf("expected truncation marker with rune count 7010, got:\n%.200s", result)
+	}
+	for _, l := range strings.Split(result, "\n") {
+		if strings.HasPrefix(l, "1|") {
+			if !utf8.ValidString(l) {
+				t.Error("truncated line is not valid UTF-8")
+			}
+		}
 	}
 }
 

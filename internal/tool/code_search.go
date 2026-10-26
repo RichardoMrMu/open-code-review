@@ -15,8 +15,9 @@ import (
 )
 
 const (
-	gitGrepMaxCount = 100
-	gitGrepTimeout  = 10 * time.Second
+	gitGrepMaxCount    = 100
+	gitGrepMaxLineLen  = 4096
+	gitGrepTimeout     = 10 * time.Second
 )
 
 // CodeSearchProvider performs text search across the repository using git grep.
@@ -200,6 +201,7 @@ func (p *CodeSearchProvider) gitGrep(ctx context.Context, searchText string, cas
 
 	matchCount := 0
 	truncated := false
+	truncatedLines := 0
 	matchedFiles := make(map[string]bool)
 	for _, line := range lines {
 		if line == "" {
@@ -223,7 +225,15 @@ func (p *CodeSearchProvider) gitGrep(ctx context.Context, searchText string, cas
 			truncated = true
 			continue
 		}
-		m := match{lineNum: ln, content: parts[offset+2]}
+		content := parts[offset+2]
+		// Committed minified bundles can put megabytes on a single line; the
+		// match-count cap alone does not bound the tool result, so truncate
+		// oversize lines to protect the context window.
+		if r := []rune(content); len(r) > gitGrepMaxLineLen {
+			content = truncateMatchLine(content, len(r))
+			truncatedLines++
+		}
+		m := match{lineNum: ln, content: content}
 		if !seen[fname] {
 			seen[fname] = true
 			fileOrder = append(fileOrder, fname)
@@ -235,6 +245,9 @@ func (p *CodeSearchProvider) gitGrep(ctx context.Context, searchText string, cas
 	var sb strings.Builder
 	if truncated {
 		sb.WriteString(fmt.Sprintf("Note: Showing the first %d matches across %d matching files. Some files are partially shown or omitted entirely. Narrow file_patterns to see the rest.\n", gitGrepMaxCount, len(matchedFiles)))
+	}
+	if truncatedLines > 0 {
+		sb.WriteString(fmt.Sprintf("Note: %d match line(s) exceeded %d characters and were truncated to protect the context window.\n", truncatedLines, gitGrepMaxLineLen))
 	}
 
 	for _, path := range fileOrder {
@@ -251,6 +264,13 @@ func (p *CodeSearchProvider) gitGrep(ctx context.Context, searchText string, cas
 	}
 
 	return sb.String(), nil
+}
+
+// truncateMatchLine keeps the first max runes of an oversize matched line and
+// appends a marker carrying the true rune count, so a single minified line can
+// never blow up the tool result while the diagnostic information survives.
+func truncateMatchLine(s string, runeLen int) string {
+	return string([]rune(s)[:gitGrepMaxLineLen]) + fmt.Sprintf(" ...(truncated, total %d chars)", runeLen)
 }
 
 func trimGitUsage(stderr string, exitCode int) string {
