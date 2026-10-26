@@ -1,7 +1,7 @@
 #### Move Review Principles
 > Favor precision over recall: report only issues likely to cause loss of funds, permanent lockup, unauthorized access, or a security vulnerability on a reachable path. Move is a resource-oriented language: resources are linear values that cannot be copied or dropped implicitly, and every `abort` unwinds the whole transaction. The `.move` extension is used by both Sui and Aptos (and other Move-based chains); when a finding depends on chain-specific semantics (object model vs. global storage), verify the framework imports (`sui::` vs. `aptos_std::`) before reporting. Do not report codegen or generated bindings.
 
-> **Sources.** Rules below are grounded in the official language and framework references: Move Book § Abilities, § Global Storage, § Signer, § Integers and § In-Depth Modules (move-language.github.io/move); Sui Move docs on object ownership, `&mut` object entry functions, and transfer/balance handling (docs.sui.io/guides/developer); Aptos Move docs on `signer`, `coin`, global storage, and framework upgrades (aptos.dev/en/build/smart-contracts). Chain-specific claims (object model vs. global storage) are called out per rule; where a rule is a common audit pattern rather than a direct quote from one of these references, it is phrased as a behavior to verify rather than a hard language rule.
+> **Sources.** Rules below are grounded in the official language and framework references: Move Book § Abilities, § Global Storage, § Signer, § Integers and § In-Depth Modules (move-language.github.io/move); Sui Move docs on object ownership, `&mut` object entry functions, and transfer/balance handling (docs.sui.io/guides/developer); Aptos Move docs on `signer`, `coin`, global storage, and framework upgrades (aptos.dev/en/build/smart-contracts). Chain-specific claims (object model vs. global storage) are called out per rule; where a rule is a common audit pattern rather than a direct quote from one of these references, it is phrased as a behavior to verify rather than a hard language rule. Transfer/balance claims were checked against the framework sources themselves: `MystenLabs/sui` `coin.move`, `balance.move`, `transfer.move` and `aptos-labs/aptos-core` `coin.move` on `main`.
 
 Do not duplicate what the Move compiler, `aptos move prove`/Prover, or linters already flag unless the diff creates concrete correctness impact. Before reporting non-local behavior, verify the caller, the abilities on the type, and the storage/object layout rather than inferring them from names.
 
@@ -10,20 +10,19 @@ Do not duplicate what the Move compiler, `aptos move prove`/Prover, or linters a
 - Do not report typos inside comments or doc prose unless the string is matched on elsewhere
 
 #### Asset and Balance Handling
-- A `coin::transfer`/`balance::transfer` (Sui) or `coin::transfer` (Aptos) whose `amount` is derived from caller-controlled input without a prior balance check, allowing the function to move more than the caller owns
+- A custom vault/withdrawal entry that takes a caller-specified `amount` out of a shared `Balance`/pool and moves it without checking against the caller's deposited balance, letting them drain more than they own. The framework entry points themselves never allow this: Sui `coin::split`/`coin::take` and `balance::split` abort (`ENotEnough`) when the caller lacks the balance, Sui `coin::send_funds`/`transfer::transfer` move the whole coin object with no amount argument, and there is no Sui `balance::transfer` (Sui exposes `balance::send_funds`, which pushes a `Balance` into the recipient's funds accumulator). Aptos `coin::withdraw`/`coin::transfer` likewise move only out of the signer's own `CoinStore` and abort on insufficient balance
 - A wrapped-coin or escrow that credits the depositor using the transferred amount argument rather than the measured balance delta, so fee-on-transfer or rebasing tokens over-credit
 - A withdrawal path that returns the full balance while leaving the withdrawal fee or reserve unaccounted
 - `destroy`/`burn` on a coin or object whose value is never reconciled, silently removing supply
 - A `Coin`/`Balance` (or Aptos `Coin`) stored in a struct that is not protected from double-spend via `take` + `deposit` mismatches
 
 #### Global Storage and Borrow Safety
-- `borrow_global_mut` (Aptos) on a resource that another borrow may alias in the same transaction, or a mutable borrow taken and then used after the borrow scope ends
-- `move_from`/`move_to` (Aptos) sequences where a resource is moved out and the module continues to assume it exists (missing existence check on a later `borrow_global`)
+- Do not report borrow aliasing or use-after-scope by itself: the Move borrow checker rejects in-function cases at compile time, and a cross-function double mutable borrow aborts the transaction safely (no state corruption, no fund loss). Only flag a borrow pattern when the abort can leave a half-applied partial update to a shared object/balance, or when a `move_from`/`move_to` (Aptos) sequence moves a resource out and the module later assumes it still exists on a path that is not a deliberate abort
 - A `signer`-gated global-storage write whose signer address is not actually derived from the resource owner being modified
 - Sui object ownership: `&mut` object passed where a shared or immutable object is required, letting a transaction mutate state another party depends on without the right constraint
 
 #### Abilities and Resource Safety
-- A struct declared with `copy` or `drop` where the fields hold a resource that must remain linear (a `Coin` inside a `copy`-able struct)
+- Do not report a struct declared `copy`/`drop` that holds a linear resource (e.g. a Sui `Coin`): the abilities checker requires every field to carry the ability and rejects this at compile time. The reviewer-relevant residual is the next bullet
 - `store` added to a struct that now allows arbitrary storage of a capability or authority token
 - A key/store mismatch: an object stored under a key that does not match its declared type, or a Sui object used as a global key
 - Missing `store` on a struct that is placed inside a Sui object field, producing a compile-time capability that is too narrow or too wide
@@ -50,8 +49,7 @@ Do not duplicate what the Move compiler, `aptos move prove`/Prover, or linters a
 - A spot price or reserve read from a single pool/order-book without manipulation resistance when it gates liquidation or mint/burn
 
 #### Upgrade and Compatibility
-- Removed or reordered fields in an upgrade path where existing on-chain state would be misread (Aptos framework upgrades or Sui package upgrades)
-- A struct field added without a default, breaking readers of previously published state
+- Upgrade compatibility: the Sui package verifier already rejects removed/reordered/renamed fields, changed abilities, and removed functions at upgrade time, and Aptos framework upgrades are governance-only — do not report these inside application diffs. The reviewer-relevant case is a new field added to a struct already persisted as on-chain state without a default/backfill path that existing readers tolerate
 - `#[test_only]` or test helpers shipped in the main module and reachable from production entry points
 - Upgrades that change the semantics of an existing public function without a version bump or migration
 
