@@ -132,6 +132,8 @@ func TestIsAllowedExt(t *testing.T) {
 		{".sol", true},
 		{".SOL", true},
 		{".vy", true},
+		{".move", true},
+		{".MOVE", true},
 		{".VY", true},
 		{".rego", true},
 		{".REGO", true},
