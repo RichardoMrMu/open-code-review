@@ -893,3 +893,28 @@ func TestBuildGrepArgs_NoIndex(t *testing.T) {
 	assertContains(t, args, "--exclude-standard")
 	assertNotContains(t, args, "--untracked")
 }
+
+// TestGitGrep_TotalOutputCap is the RED for the total-output ceiling. It builds
+// 100 files x one ~3000-rune line, every line under the per-line cap, so the
+// only way the result can exceed the 262144-rune budget is accumulation.
+// Pre-fix the result blows past the budget and carries no budget note.
+func TestGitGrep_TotalOutputCap(t *testing.T) {
+	dir := setupTestRepo(t)
+	for i := 0; i < gitGrepMaxCount; i++ {
+		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("f%03d.js", i)),
+			[]byte("// Needle "+strings.Repeat("界", 3000)+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p := NewCodeSearch(&FileReader{RepoDir: dir, Mode: ModeWorkspace})
+	result, err := p.gitGrep(context.Background(), "Needle", false, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := utf8.RuneCountInString(result); r > 262144+200 {
+		t.Errorf("total output %d runes exceeds 262144 budget", r)
+	}
+	if !strings.Contains(result, "total budget") {
+		t.Errorf("expected total-budget note in output")
+	}
+}

@@ -12,12 +12,14 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const (
-	gitGrepMaxCount    = 100
-	gitGrepMaxLineLen  = 4096
-	gitGrepTimeout     = 10 * time.Second
+	gitGrepMaxCount       = 100
+	gitGrepMaxLineLen     = 4096
+	gitGrepMaxOutputRunes = 262144 // 256K runes: hard ceiling on the whole tool result
+	gitGrepTimeout        = 10 * time.Second
 )
 
 // CodeSearchProvider performs text search across the repository using git grep.
@@ -202,6 +204,7 @@ func (p *CodeSearchProvider) gitGrep(ctx context.Context, searchText string, cas
 	matchCount := 0
 	truncated := false
 	truncatedLines := 0
+	outputTruncated := false
 	matchedFiles := make(map[string]bool)
 	for _, line := range lines {
 		if line == "" {
@@ -250,13 +253,34 @@ func (p *CodeSearchProvider) gitGrep(ctx context.Context, searchText string, cas
 		sb.WriteString(fmt.Sprintf("Note: %d match line(s) exceeded %d characters and were truncated to protect the context window.\n", truncatedLines, gitGrepMaxLineLen))
 	}
 
+	totalRunes := 0
+	addLine := func(line string) bool {
+		if totalRunes+utf8.RuneCountInString(line) > gitGrepMaxOutputRunes {
+			return false
+		}
+		sb.WriteString(line)
+		totalRunes += utf8.RuneCountInString(line)
+		return true
+	}
 	for _, path := range fileOrder {
 		matches := fileMatches[path]
-		sb.WriteString(fmt.Sprintf("File: %s\nMatch lines: %d\n", path, len(matches)))
-		for _, m := range matches {
-			sb.WriteString(fmt.Sprintf("%d|%s\n", m.lineNum, m.content))
+		if !addLine(fmt.Sprintf("File: %s\nMatch lines: %d\n", path, len(matches))) {
+			outputTruncated = true
+			break
 		}
-		sb.WriteString("\n")
+		for _, m := range matches {
+			if !addLine(fmt.Sprintf("%d|%s\n", m.lineNum, m.content)) {
+				outputTruncated = true
+				break
+			}
+		}
+		if outputTruncated {
+			break
+		}
+		addLine("\n")
+	}
+	if outputTruncated {
+		sb.WriteString(fmt.Sprintf("Note: output exceeded the %d-rune total budget and further matches were omitted.\n", gitGrepMaxOutputRunes))
 	}
 
 	if err != nil && errStr != "" {
