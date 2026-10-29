@@ -61,6 +61,7 @@
   "**/test/**/*.vy",
   "**/tests/**/*.vy",
   "**/tests/**/*.move",
+  "**/build/**/*.move",
   "**/node_modules/**",
   "**/bower_components/**",
   "**/.pnpm-store/**",
